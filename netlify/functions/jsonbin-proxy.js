@@ -106,6 +106,18 @@ exports.handler = async (event) => {
       return reply(200, { ok: true, binId: json?.metadata?.id || '' });
     }
 
+
+    if (action === 'delete') {
+      if (!binId) return reply(400, { ok: false, error: 'binId가 필요합니다.' });
+      const emptyData = [];
+      await fetchJsonbin(`${BASE}/${binId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(emptyData),
+      });
+      return reply(200, { ok: true, binId, deleted: true, type });
+    }
+
     if (action === 'health') {
       return reply(200, { ok: true, hasMasterKey: true, qaBinId: !!DEFAULT_QA_BIN_ID, idsBinId: !!DEFAULT_IDS_BIN_ID });
     }
