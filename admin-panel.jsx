@@ -358,6 +358,63 @@ async function parseExcelFile(file) {
   });
 }
 
+function exportQAToXlsx(items, filename = `qa-export-${Date.now()}.xlsx`) {
+  if (!window.XLSX) throw new Error('엑셀 파서 라이브러리가 로드되지 않았습니다.');
+  const rows = (items || []).map(it => ({
+    '질문번호': it.qnum || '',
+    '장': it.chapter || '',
+    '절': it.section || '',
+    '제목(키워드)': it.title || '',
+    '질문(원문)': it.question || '',
+    '답변(원문)': it.answer || '',
+    '출처': it.sourceFile || it.source || '',
+    '문서번호': it.docNum || '',
+    '발행일': it.date || it.year || '',
+  }));
+  const wb = window.XLSX.utils.book_new();
+  const ws = window.XLSX.utils.json_to_sheet(rows, { header: ['질문번호','장','절','제목(키워드)','질문(원문)','답변(원문)','출처','문서번호','발행일'] });
+  window.XLSX.utils.book_append_sheet(wb, ws, 'QnA');
+  window.XLSX.writeFile(wb, filename);
+}
+
+function exportIdsToXlsx(items, filename = `ids-export-${Date.now()}.xlsx`) {
+  if (!window.XLSX) throw new Error('엑셀 파서 라이브러리가 로드되지 않았습니다.');
+  const rows = (items || []).map(it => ({
+    '승인ID': it.id || '',
+    '이름': it.name || '',
+    '역할': it.role || 'user',
+    '활성여부': it.active === false ? 'false' : 'true',
+    '등록일': it.addedAt || '',
+  }));
+  const wb = window.XLSX.utils.book_new();
+  const ws = window.XLSX.utils.json_to_sheet(rows, { header: ['승인ID','이름','역할','활성여부','등록일'] });
+  window.XLSX.utils.book_append_sheet(wb, ws, 'IDs');
+  window.XLSX.writeFile(wb, filename);
+}
+
+async function resolveServerBins() {
+  const localCfg = getStoredServerConfig() || {};
+  let envCfg = {};
+  try {
+    const j = await proxyCall({ action: 'get-config' });
+    envCfg = j?.config || {};
+  } catch {}
+  return {
+    qaBinId: localCfg.qaBinId || envCfg.qaBinId || '',
+    idsBinId: localCfg.idsBinId || envCfg.idsBinId || '',
+  };
+}
+
+async function autoSyncToServer(nextQa, nextIds) {
+  const cfg = await resolveServerBins();
+  const jobs = [];
+  if (cfg.qaBinId) jobs.push(jsonbinPut(cfg.qaBinId, nextQa, 'qa'));
+  if (cfg.idsBinId) jobs.push(jsonbinPut(cfg.idsBinId, nextIds, 'ids'));
+  if (!jobs.length) return { synced: false };
+  await Promise.all(jobs);
+  return { synced: true };
+}
+
 // ─────────────────────────────────────────────────────────────
 // ImportExport — JSON & 엑셀 가져오기/내보내기
 // ─────────────────────────────────────────────────────────────
@@ -365,100 +422,68 @@ function ImportExport({ data, setData, approvedIds, setApprovedIds, fontScale })
   const [mode, setMode] = React.useState('append');
   const [msg, setMsg] = React.useState('');
   const [isLoading, setIsLoading] = React.useState(false);
-  const qJsonRef = React.useRef(null);
   const qXlsxRef = React.useRef(null);
-  const iJsonRef = React.useRef(null);
   const iXlsxRef = React.useRef(null);
+  const xlsxAvailable = !!window.XLSX;
 
-  const exp = (obj, fn) => {
-    const b = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' });
-    const u = URL.createObjectURL(b); const a = document.createElement('a');
-    a.href = u; a.download = fn; a.click(); URL.revokeObjectURL(u);
-  };
-
-  // ── Q&A 가져오기 ──
-  const impQAJson = async (file) => {
-    try {
-      const p = JSON.parse(await file.text());
-      if (!Array.isArray(p)) throw new Error('배열 형식이어야 합니다');
-      applyQA(p);
-    } catch (e) { setMsg('❌ 실패: ' + e.message); }
-    if (qJsonRef.current) qJsonRef.current.value = '';
-  };
+  const setDone = (text, isError = false) => setMsg((isError ? '❌ ' : '✅ ') + text);
 
   const impQAXlsx = async (file) => {
     setIsLoading(true); setMsg('엑셀 파일 읽는 중…');
     try {
       const rows = await parseExcelFile(file);
-      if (!rows.length) throw new Error('데이터가 없습니다');
+      if (!rows.length) throw new Error('데이터가 없습니다.');
       const maxId = mode === 'replace' ? 0 : Math.max(0, ...data.map(d => d.id || 0));
       const items = rows.map((r, i) => xlsxRowToQA(r, i, maxId)).filter(Boolean);
-      if (!items.length) throw new Error('인식된 Q&A 행이 없습니다. 컬럼명을 확인하세요.');
-      applyQA(items, true);
-    } catch (e) { setMsg('❌ 실패: ' + e.message); }
-    if (qXlsxRef.current) qXlsxRef.current.value = '';
-    setIsLoading(false);
-  };
-
-  const applyQA = (items, fromXlsx = false) => {
-    const label = fromXlsx ? '엑셀' : 'JSON';
-    if (mode === 'replace') {
-      setData(items);
-      setMsg(`✅ ${label} 전체 교체 완료: ${items.length}건`);
-    } else {
-      const maxId = Math.max(0, ...data.map(d => d.id || 0));
-      const merged = items.map((it, i) => ({ ...it, id: it.id || (maxId + i + 1) }));
-      setData([...data, ...merged]);
-      setMsg(`✅ ${label} 추가 완료: ${merged.length}건`);
+      if (!items.length) throw new Error('인식된 Q&A 행이 없습니다. 양식 헤더를 확인해 주세요.');
+      const nextQa = mode === 'replace' ? items : [...data, ...items];
+      setData(nextQa);
+      const sync = await autoSyncToServer(nextQa, approvedIds);
+      setDone(sync.synced ? `Q&A ${items.length}건 업로드 완료 · 서버 자동 저장 완료` : `Q&A ${items.length}건 업로드 완료 · 서버 Bin 미설정으로 로컬에만 반영됨`);
+    } catch (e) {
+      setDone(e.message || '업로드 실패', true);
+    } finally {
+      if (qXlsxRef.current) qXlsxRef.current.value = '';
+      setIsLoading(false);
     }
-  };
-
-  // ── 승인 ID 가져오기 ──
-  const impIdJson = async (file) => {
-    try {
-      const p = JSON.parse(await file.text());
-      if (!Array.isArray(p)) throw new Error('배열 형식이어야 합니다');
-      setApprovedIds(p);
-      setMsg(`✅ JSON ID 교체 완료: ${p.length}건`);
-    } catch (e) { setMsg('❌ 실패: ' + e.message); }
-    if (iJsonRef.current) iJsonRef.current.value = '';
   };
 
   const impIdXlsx = async (file) => {
     setIsLoading(true); setMsg('엑셀 파일 읽는 중…');
     try {
       const rows = await parseExcelFile(file);
-      if (!rows.length) throw new Error('데이터가 없습니다');
+      if (!rows.length) throw new Error('데이터가 없습니다.');
       const items = rows.map(xlsxRowToID).filter(Boolean);
-      if (!items.length) throw new Error('인식된 ID 행이 없습니다. "ID" 컬럼이 있는지 확인하세요.');
+      if (!items.length) throw new Error('인식된 승인 ID 행이 없습니다. "승인ID" 또는 "ID" 헤더를 확인해 주세요.');
       setApprovedIds(items);
-      setMsg(`✅ 엑셀 ID 교체 완료: ${items.length}건`);
-    } catch (e) { setMsg('❌ 실패: ' + e.message); }
-    if (iXlsxRef.current) iXlsxRef.current.value = '';
-    setIsLoading(false);
+      const sync = await autoSyncToServer(data, items);
+      setDone(sync.synced ? `승인 ID ${items.length}건 업로드 완료 · 서버 자동 저장 완료` : `승인 ID ${items.length}건 업로드 완료 · 서버 Bin 미설정으로 로컬에만 반영됨`);
+    } catch (e) {
+      setDone(e.message || '업로드 실패', true);
+    } finally {
+      if (iXlsxRef.current) iXlsxRef.current.value = '';
+      setIsLoading(false);
+    }
   };
-
-  const xlsxAvailable = !!window.XLSX;
 
   return (
     <div>
       <h2 style={{ fontSize: 20 * fontScale, margin: '0 0 6px', fontWeight: 600 }}>가져오기 / 내보내기</h2>
       <p style={{ fontSize: 13 * fontScale, color: 'var(--fg-sub)', margin: '0 0 8px' }}>
-        Q&A 데이터와 승인 ID를 <strong>JSON</strong> 또는 <strong>엑셀(.xlsx)</strong> 파일로 바로 업로드·다운로드합니다.
+        <strong>엑셀(.xlsx)</strong> 파일만 업로드할 수 있습니다. 업로드가 끝나면 서버 저장소가 연결된 경우 자동으로 서버에도 반영됩니다.
       </p>
 
-      {/* 엑셀 컬럼 안내 */}
       <div style={{ marginBottom: 20, padding: '12px 16px', background: 'var(--accent-bg)', border: '1px solid var(--line-strong)', borderRadius: 8, fontSize: 12 * fontScale, color: 'var(--fg-sub)', lineHeight: 1.8 }}>
-        <strong style={{ color: 'var(--accent)' }}>📋 엑셀 컬럼명 가이드</strong>
+        <strong style={{ color: 'var(--accent)' }}>📋 업로드 양식 헤더</strong>
         <div style={{ marginTop: 6, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px' }}>
-          <div><strong style={{ color: 'var(--fg)' }}>Q&A 엑셀</strong> — 첫 행이 헤더여야 합니다<br />
+          <div><strong style={{ color: 'var(--fg)' }}>Q&A 엑셀</strong><br />
             <span style={{ fontFamily: 'var(--ff-mono)', fontSize: 11 * fontScale }}>
-              질문번호(qnum) · 제목(title) · 질문(question) · 답변(answer) · 출처(sourceFile) · 장 · 절 · 발행일(date) · 연도(year) · 카테고리(유형)
+              질문번호 · 장 · 절 · 제목(키워드) · 질문(원문) · 답변(원문) · 출처 · 문서번호 · 발행일
             </span>
           </div>
-          <div><strong style={{ color: 'var(--fg)' }}>ID 엑셀</strong> — ID 컬럼만 필수<br />
+          <div><strong style={{ color: 'var(--fg)' }}>승인 ID 엑셀</strong><br />
             <span style={{ fontFamily: 'var(--ff-mono)', fontSize: 11 * fontScale }}>
-              ID(필수) · 이름(name) · 역할(role: user/admin) · 활성여부(active: true/false) · 등록일(addedAt)
+              승인ID · 이름 · 역할 · 활성여부 · 등록일
             </span>
           </div>
         </div>
@@ -466,72 +491,51 @@ function ImportExport({ data, setData, approvedIds, setApprovedIds, fontScale })
 
       {!xlsxAvailable && (
         <div style={{ marginBottom: 14, padding: '10px 14px', background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 8, fontSize: 12 * fontScale, color: '#dc2626' }}>
-          ⚠️ 엑셀 파서가 로드되지 않았습니다. 페이지를 새로고침하거나 인터넷 연결을 확인해 주세요.
+          ⚠️ 엑셀 파서 라이브러리가 로드되지 않았습니다. 페이지를 새로고침하거나 인터넷 연결을 확인해 주세요.
         </div>
       )}
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
-
-        {/* ── Q&A 패널 ── */}
         <div style={{ border: '1px solid var(--line)', borderRadius: 10, padding: 20, background: 'var(--bg-sub)' }}>
           <div style={{ fontSize: 11 * fontScale, fontFamily: 'var(--ff-mono)', color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 10 }}>
             Q&A 데이터 ({data.length}건)
           </div>
-          <button onClick={() => exp(data, `qa-export-${Date.now()}.json`)} style={{ ...pBtn(fontScale), marginBottom: 16, width: '100%' }}>
-            ⬇ JSON으로 내보내기
-          </button>
-
           <div style={{ fontSize: 11 * fontScale, color: 'var(--muted)', marginBottom: 6, fontFamily: 'var(--ff-mono)', textTransform: 'uppercase', letterSpacing: 0.6 }}>가져오기 모드</div>
           <div style={{ display: 'flex', gap: 4, marginBottom: 12, padding: 3, background: 'var(--bg)', border: '1px solid var(--line-strong)', borderRadius: 6 }}>
             <button onClick={() => setMode('append')} style={segB(mode === 'append', fontScale)}>추가</button>
             <button onClick={() => setMode('replace')} style={segB(mode === 'replace', fontScale)}>전체 교체</button>
           </div>
-
-          {/* JSON 업로드 */}
-          <input ref={qJsonRef} type="file" accept=".json" onChange={(e) => e.target.files[0] && impQAJson(e.target.files[0])} style={{ display: 'none' }} />
-          <button onClick={() => qJsonRef.current?.click()} style={{ ...sBtn2(fontScale), width: '100%', marginBottom: 8 }}>
-            📄 JSON 파일 선택…
-          </button>
-
-          {/* 엑셀 업로드 */}
-          <input ref={qXlsxRef} type="file" accept=".xlsx,.xls,.csv" onChange={(e) => e.target.files[0] && impQAXlsx(e.target.files[0])} style={{ display: 'none' }} />
+          <input ref={qXlsxRef} type="file" accept=".xlsx" onChange={(e) => e.target.files[0] && impQAXlsx(e.target.files[0])} style={{ display: 'none' }} />
           <button onClick={() => qXlsxRef.current?.click()} disabled={!xlsxAvailable || isLoading}
-            style={{ ...sBtn2(fontScale), width: '100%', borderColor: 'var(--accent)', color: 'var(--accent)', opacity: (!xlsxAvailable || isLoading) ? 0.5 : 1, cursor: (!xlsxAvailable || isLoading) ? 'not-allowed' : 'pointer' }}>
-            📊 엑셀(.xlsx) 파일 선택…
+            style={{ ...sBtn2(fontScale), width: '100%', borderColor: 'var(--accent)', color: 'var(--accent)', opacity: (!xlsxAvailable || isLoading) ? 0.5 : 1, cursor: (!xlsxAvailable || isLoading) ? 'not-allowed' : 'pointer', marginBottom: 10 }}>
+            📊 Q&A 엑셀(.xlsx) 업로드
+          </button>
+          <button onClick={() => exportQAToXlsx(data)} disabled={!xlsxAvailable || isLoading} style={{ ...pBtn(fontScale), width: '100%', opacity: (!xlsxAvailable || isLoading) ? 0.5 : 1 }}>
+            ⬇ Q&A 엑셀로 내보내기
           </button>
         </div>
 
-        {/* ── 승인 ID 패널 ── */}
         <div style={{ border: '1px solid var(--line)', borderRadius: 10, padding: 20, background: 'var(--bg-sub)' }}>
           <div style={{ fontSize: 11 * fontScale, fontFamily: 'var(--ff-mono)', color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 10 }}>
             승인 ID ({approvedIds.length}건) — 항상 전체 교체
           </div>
-          <button onClick={() => exp(approvedIds, `ids-export-${Date.now()}.json`)} style={{ ...pBtn(fontScale), marginBottom: 16, width: '100%' }}>
-            ⬇ JSON으로 내보내기
-          </button>
-
-          {/* JSON 업로드 */}
-          <input ref={iJsonRef} type="file" accept=".json" onChange={(e) => e.target.files[0] && impIdJson(e.target.files[0])} style={{ display: 'none' }} />
-          <button onClick={() => iJsonRef.current?.click()} style={{ ...sBtn2(fontScale), width: '100%', marginBottom: 8 }}>
-            📄 JSON 파일 선택…
-          </button>
-
-          {/* 엑셀 업로드 */}
-          <input ref={iXlsxRef} type="file" accept=".xlsx,.xls,.csv" onChange={(e) => e.target.files[0] && impIdXlsx(e.target.files[0])} style={{ display: 'none' }} />
+          <input ref={iXlsxRef} type="file" accept=".xlsx" onChange={(e) => e.target.files[0] && impIdXlsx(e.target.files[0])} style={{ display: 'none' }} />
           <button onClick={() => iXlsxRef.current?.click()} disabled={!xlsxAvailable || isLoading}
-            style={{ ...sBtn2(fontScale), width: '100%', borderColor: '#059669', color: '#059669', opacity: (!xlsxAvailable || isLoading) ? 0.5 : 1, cursor: (!xlsxAvailable || isLoading) ? 'not-allowed' : 'pointer' }}>
-            📊 엑셀(.xlsx) 파일 선택…
+            style={{ ...sBtn2(fontScale), width: '100%', borderColor: '#059669', color: '#059669', opacity: (!xlsxAvailable || isLoading) ? 0.5 : 1, cursor: (!xlsxAvailable || isLoading) ? 'not-allowed' : 'pointer', marginBottom: 10 }}>
+            📊 승인 ID 엑셀(.xlsx) 업로드
           </button>
-
+          <button onClick={() => exportIdsToXlsx(approvedIds)} disabled={!xlsxAvailable || isLoading} style={{ ...pBtn(fontScale), width: '100%', background: '#059669', opacity: (!xlsxAvailable || isLoading) ? 0.5 : 1 }}>
+            ⬇ 승인 ID 엑셀로 내보내기
+          </button>
           <div style={{ marginTop: 12, fontSize: 11 * fontScale, color: 'var(--muted)', lineHeight: 1.6 }}>
-            업로드 후 <strong>서버 저장소 탭 → 서버에 업로드</strong>를 실행하면 모든 사용자에게 즉시 반영됩니다.
+            업로드가 끝나면 연결된 서버 저장소에 자동으로 저장됩니다.
           </div>
         </div>
       </div>
 
       {isLoading && <div style={{ marginTop: 14, padding: '10px 14px', borderRadius: 8, background: 'var(--bg-sub)', fontSize: 12.5 * fontScale, color: 'var(--muted)', fontFamily: 'var(--ff-mono)' }}>처리 중…</div>}
       {msg && !isLoading && (
-        <div style={{ marginTop: 14, padding: '10px 14px', borderRadius: 8, background: msg.includes('❌') ? '#fef2f2' : 'var(--accent-bg)', color: msg.includes('❌') ? '#dc2626' : 'var(--accent)', fontSize: 12.5 * fontScale, fontFamily: 'var(--ff-mono)', whiteSpace: 'pre-line' }}>
+        <div style={{ marginTop: 14, padding: '10px 14px', borderRadius: 8, background: msg.startsWith('❌') ? '#fef2f2' : 'var(--accent-bg)', color: msg.startsWith('❌') ? '#dc2626' : 'var(--accent)', fontSize: 12.5 * fontScale, fontFamily: 'var(--ff-mono)', whiteSpace: 'pre-line' }}>
           {msg}
         </div>
       )}
@@ -542,6 +546,229 @@ function ImportExport({ data, setData, approvedIds, setApprovedIds, fontScale })
 
 // ─────────────────────────────────────────────────────────────
 // ServerStorageTab — JSONBin.io 기반 서버 저장소
+// ─────────────────────────────────────────────────────────────
+function ServerStorageTab({ data, setData, approvedIds, setApprovedIds, fontScale }) {
+  const [config, setConfig] = React.useState(() => getStoredServerConfig() || { qaBinId: '', idsBinId: '' });
+  const [status, setStatus] = React.useState('');
+  const [isLoading, setIsLoading] = React.useState(false);
+  const [isDirty, setIsDirty] = React.useState(false);
+
+  React.useEffect(() => {
+    let alive = true;
+    proxyCall({ action: 'get-config' }).then((j) => {
+      if (!alive) return;
+      const cfg = j?.config || {};
+      if (!cfg.qaBinId && !cfg.idsBinId) return;
+      setConfig((prev) => ({
+        qaBinId: prev.qaBinId || cfg.qaBinId || '',
+        idsBinId: prev.idsBinId || cfg.idsBinId || '',
+      }));
+    }).catch(() => {});
+    return () => { alive = false; };
+  }, []);
+
+  const saveConfig = () => {
+    localStorage.setItem(SERVER_CONFIG_KEY, JSON.stringify(config));
+    setIsDirty(false);
+    setStatus('✅ Bin ID 설정이 이 브라우저에 저장되었습니다. 모든 사용자 자동 반영은 Netlify 환경변수(JSONBIN_QA_BIN_ID / JSONBIN_IDS_BIN_ID)도 함께 설정해야 합니다.');
+  };
+
+  const clearConfig = () => {
+    if (!confirm('서버 저장소 설정을 삭제하시겠습니까? 로컬 데이터는 유지됩니다.')) return;
+    localStorage.removeItem(SERVER_CONFIG_KEY);
+    setConfig({ qaBinId: '', idsBinId: '' });
+    setStatus('설정이 삭제되었습니다.');
+    setIsDirty(false);
+  };
+
+  const testConnection = async () => {
+    if (!config.qaBinId) { setStatus('❌ Q&A Bin ID를 입력하세요.'); return; }
+    setIsLoading(true); setStatus('연결 테스트 중…');
+    try {
+      const d = await jsonbinFetch(config.qaBinId, 'qa');
+      const qa = Array.isArray(d) ? d : (Array.isArray(d?.qa) ? d.qa : (Array.isArray(d?.data) ? d.data : null));
+      setStatus(`✅ 연결 성공! Q&A Bin에서 ${Array.isArray(qa) ? qa.length + '건' : '데이터'}을 확인했습니다.`);
+    } catch (e) { setStatus('❌ 연결 실패: ' + e.message); }
+    setIsLoading(false);
+  };
+
+  const createBins = async () => {
+    setIsLoading(true); setStatus('Bin 생성 중…');
+    try {
+      const qId = await jsonbinCreate('qa-data', data, 'qa');
+      const iId = await jsonbinCreate('ids-data', approvedIds, 'ids');
+      const newCfg = { ...config, qaBinId: qId, idsBinId: iId };
+      setConfig(newCfg);
+      localStorage.setItem(SERVER_CONFIG_KEY, JSON.stringify(newCfg));
+      setIsDirty(false);
+      setStatus(`✅ Bin 생성 완료! Q&A Bin: ${qId} / ID Bin: ${iId}
+현재 데이터(Q&A ${data.length}건, ID ${approvedIds.length}건)를 초기 업로드했습니다.`);
+    } catch (e) { setStatus('❌ 생성 실패: ' + e.message); }
+    setIsLoading(false);
+  };
+
+  const pullFromServer = async () => {
+    if (!config.qaBinId) { setStatus('❌ Q&A Bin ID가 필요합니다.'); return; }
+    if (!confirm('서버에서 데이터를 가져오면 현재 로컬 데이터가 덮어쓰입니다. 계속하시겠습니까?')) return;
+    setIsLoading(true); setStatus('서버에서 가져오는 중…');
+    try {
+      const msgs = [];
+      if (config.qaBinId) {
+        const qaRes = await jsonbinFetch(config.qaBinId, 'qa');
+        const qa = Array.isArray(qaRes) ? qaRes : (Array.isArray(qaRes?.qa) ? qaRes.qa : (Array.isArray(qaRes?.data) ? qaRes.data : null));
+        if (Array.isArray(qa)) { setData(qa); msgs.push(`Q&A ${qa.length}건`); }
+      }
+      if (config.idsBinId) {
+        const idsRes = await jsonbinFetch(config.idsBinId, 'ids');
+        const ids = Array.isArray(idsRes) ? idsRes : (Array.isArray(idsRes?.ids) ? idsRes.ids : (Array.isArray(idsRes?.data) ? idsRes.data : null));
+        if (Array.isArray(ids)) { setApprovedIds(ids); msgs.push(`승인 ID ${ids.length}건`); }
+      }
+      setStatus(`✅ 가져오기 완료: ${msgs.join(', ')}`);
+    } catch (e) { setStatus('❌ 가져오기 실패: ' + e.message); }
+    setIsLoading(false);
+  };
+
+  const pushToServer = async () => {
+    if (!config.qaBinId) { setStatus('❌ Q&A Bin ID가 필요합니다.'); return; }
+    if (!confirm(`현재 로컬 데이터(Q&A ${data.length}건, ID ${approvedIds.length}건)를 서버에 업로드합니다. 계속하시겠습니까?`)) return;
+    setIsLoading(true); setStatus('서버에 업로드 중…');
+    try {
+      const msgs = [];
+      if (config.qaBinId) { await jsonbinPut(config.qaBinId, data, 'qa'); msgs.push(`Q&A ${data.length}건`); }
+      if (config.idsBinId) { await jsonbinPut(config.idsBinId, approvedIds, 'ids'); msgs.push(`ID ${approvedIds.length}건`); }
+      setStatus(`✅ 업로드 완료: ${msgs.join(', ')}`);
+    } catch (e) { setStatus('❌ 업로드 실패: ' + e.message); }
+    setIsLoading(false);
+  };
+
+  const deleteServerQA = async () => {
+    if (!config.qaBinId) { setStatus('❌ Q&A Bin ID가 필요합니다.'); return; }
+    if (!confirm('정말 서버에 저장된 Q&A 전체를 삭제하시겠습니까? 이 작업은 복구할 수 없습니다.')) return;
+    setIsLoading(true); setStatus('서버 Q&A 삭제 중…');
+    try {
+      await proxyCall({ action: 'delete', binId: config.qaBinId, type: 'qa' });
+      setData([]);
+      setStatus('✅ 서버 Q&A 전체 삭제 완료');
+    } catch (e) {
+      setStatus('❌ Q&A 삭제 실패: ' + e.message);
+    }
+    setIsLoading(false);
+  };
+
+  const deleteServerIDs = async () => {
+    if (!config.idsBinId) { setStatus('❌ 승인 ID Bin ID가 필요합니다.'); return; }
+    if (!confirm('정말 서버에 저장된 승인 ID 전체를 삭제하시겠습니까? 이 작업은 복구할 수 없습니다.')) return;
+    setIsLoading(true); setStatus('서버 승인 ID 삭제 중…');
+    try {
+      await proxyCall({ action: 'delete', binId: config.idsBinId, type: 'ids' });
+      setApprovedIds([]);
+      setStatus('✅ 서버 승인 ID 전체 삭제 완료');
+    } catch (e) {
+      setStatus('❌ 승인 ID 삭제 실패: ' + e.message);
+    }
+    setIsLoading(false);
+  };
+
+  const isConfigured = !!config.qaBinId;
+  return (
+    <div>
+      <h2 style={{ fontSize: 20 * fontScale, margin: '0 0 6px', fontWeight: 600 }}>서버 저장소</h2>
+      <p style={{ fontSize: 13 * fontScale, color: 'var(--fg-sub)', margin: '0 0 8px' }}>
+        Q&A 데이터와 승인 ID를 <strong>JSONBin.io</strong>에 보관하되, 브라우저에서는 <strong>Netlify Function</strong>을 통해서만 접근합니다. API Key는 브라우저에 노출되지 않고 서버 환경변수에만 저장됩니다.
+      </p>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14, margin: '20px 0 28px' }}>
+        {infoCard('1️⃣', 'JSONBin.io 준비', 'JSONBin 계정 생성 후 Master Key와 Bin ID를 준비합니다')}
+        {infoCard('2️⃣', 'Netlify 환경변수', 'JSONBIN_MASTER_KEY를 Netlify 환경변수에 저장합니다')}
+        {infoCard('3️⃣', 'Bin ID 연결', 'Q&A Bin ID와 승인 ID Bin ID를 입력해 연결합니다')}
+        {infoCard('4️⃣', '자동 반영', '환경변수에 Bin ID까지 넣으면 모든 접속자가 자동으로 최신 데이터를 받습니다')}
+      </div>
+
+      <div style={{ border: '1px solid var(--line)', borderRadius: 12, padding: 20, background: 'var(--bg)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+          <div style={{ fontSize: 16 * fontScale, fontWeight: 600 }}>Netlify Function 연결 설정</div>
+          {isConfigured && <span style={{ padding: '4px 10px', background: 'var(--accent-bg)', color: 'var(--accent)', borderRadius: 8, fontFamily: 'var(--ff-mono)', fontSize: 12 * fontScale, fontWeight: 600 }}>Bin 연결됨</span>}
+        </div>
+
+        <div style={{ padding: '14px 16px', background: 'var(--bg-sub)', border: '1px solid var(--line)', borderRadius: 10, marginBottom: 16, fontSize: 12 * fontScale, color: 'var(--fg-sub)', lineHeight: 1.8 }}>
+          <strong style={{ color: 'var(--fg)' }}>API Key는 이 화면에 입력하지 않습니다.</strong><br />
+          Netlify 사이트 설정 → 환경변수에 <code>JSONBIN_MASTER_KEY</code> 로 저장하세요.
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+          <div>
+            <label style={labelStyle(fontScale)}>Q&A BIN ID</label>
+            <input value={config.qaBinId} onChange={(e) => { setConfig({ ...config, qaBinId: e.target.value.trim() }); setIsDirty(true); }} placeholder="예: 64f1234567890abcd1234567" style={inp(fontScale, { width: '100%' })} />
+          </div>
+          <div>
+            <label style={labelStyle(fontScale)}>승인 ID BIN ID</label>
+            <input value={config.idsBinId} onChange={(e) => { setConfig({ ...config, idsBinId: e.target.value.trim() }); setIsDirty(true); }} placeholder="예: 64f1234567890abcd7654321" style={inp(fontScale, { width: '100%' })} />
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 16 }}>
+          <button onClick={saveConfig} disabled={!isDirty || isLoading} style={{ ...pBtn(fontScale), opacity: (!isDirty || isLoading) ? 0.5 : 1 }}>설정 저장</button>
+          <button onClick={testConnection} disabled={isLoading} style={{ ...sBtn2(fontScale), opacity: isLoading ? 0.5 : 1 }}>연결 테스트</button>
+          <button onClick={createBins} disabled={isLoading} style={{ ...sBtn2(fontScale), opacity: isLoading ? 0.5 : 1 }}>🗑️ Bin 자동 생성 (현재 데이터로 초기화)</button>
+          <button onClick={clearConfig} disabled={isLoading} style={{ ...sBtn2(fontScale), color: '#dc2626', borderColor: '#fecaca', opacity: isLoading ? 0.5 : 1 }}>설정 삭제</button>
+        </div>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18, marginTop: 18 }}>
+        <div style={{ border: '1px solid var(--line)', borderRadius: 12, padding: 20, background: 'var(--bg)' }}>
+          <div style={{ fontSize: 18 * fontScale, fontWeight: 700, marginBottom: 10 }}>⬆️ 서버에 업로드</div>
+          <div style={{ fontSize: 13 * fontScale, color: 'var(--fg-sub)', lineHeight: 1.7, marginBottom: 16 }}>
+            현재 로컬 데이터(Q&A + ID)를 서버에 저장합니다. 모든 사용자가 다음 접속 시 최신 데이터를 받습니다.
+          </div>
+          <button onClick={pushToServer} disabled={!isConfigured || isLoading} style={{ ...pBtn(fontScale), width: '100%', opacity: (!isConfigured || isLoading) ? 0.5 : 1 }}>
+            서버에 업로드 (Q&A {data.length}건, ID {approvedIds.length}건)
+          </button>
+        </div>
+
+        <div style={{ border: '1px solid var(--line)', borderRadius: 12, padding: 20, background: 'var(--bg)' }}>
+          <div style={{ fontSize: 18 * fontScale, fontWeight: 700, marginBottom: 10 }}>⬇️ 서버에서 가져오기</div>
+          <div style={{ fontSize: 13 * fontScale, color: 'var(--fg-sub)', lineHeight: 1.7, marginBottom: 16 }}>
+            서버의 최신 데이터로 현재 로컬 데이터를 교체합니다. 현재 로컬 변경사항은 덮어써집니다.
+          </div>
+          <button onClick={pullFromServer} disabled={!isConfigured || isLoading} style={{ ...sBtn2(fontScale), width: '100%', opacity: (!isConfigured || isLoading) ? 0.5 : 1 }}>
+            서버에서 가져오기
+          </button>
+        </div>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18, marginTop: 18 }}>
+        <div style={{ border: '1px solid #fecaca', borderRadius: 12, padding: 20, background: '#fff7f7' }}>
+          <div style={{ fontSize: 18 * fontScale, fontWeight: 700, marginBottom: 10, color: '#b91c1c' }}>🗑️ 서버 Q&A 삭제</div>
+          <div style={{ fontSize: 13 * fontScale, color: '#7f1d1d', lineHeight: 1.7, marginBottom: 16 }}>
+            서버에 저장된 Q&A 전체를 삭제합니다. 삭제 후 복구할 수 없습니다.
+          </div>
+          <button onClick={deleteServerQA} disabled={!config.qaBinId || isLoading} style={{ ...pBtn(fontScale), width: '100%', background: '#dc2626', opacity: (!config.qaBinId || isLoading) ? 0.5 : 1 }}>
+            Q&A 전체 삭제
+          </button>
+        </div>
+
+        <div style={{ border: '1px solid #fed7aa', borderRadius: 12, padding: 20, background: '#fffaf5' }}>
+          <div style={{ fontSize: 18 * fontScale, fontWeight: 700, marginBottom: 10, color: '#c2410c' }}>🗑️ 서버 승인 ID 삭제</div>
+          <div style={{ fontSize: 13 * fontScale, color: '#9a3412', lineHeight: 1.7, marginBottom: 16 }}>
+            서버에 저장된 승인 ID 전체를 삭제합니다. 삭제 후 복구할 수 없습니다.
+          </div>
+          <button onClick={deleteServerIDs} disabled={!config.idsBinId || isLoading} style={{ ...pBtn(fontScale), width: '100%', background: '#ea580c', opacity: (!config.idsBinId || isLoading) ? 0.5 : 1 }}>
+            승인 ID 전체 삭제
+          </button>
+        </div>
+      </div>
+
+      {status && (
+        <div style={{ marginTop: 18, padding: '12px 14px', borderRadius: 8, background: status.startsWith('❌') ? '#fef2f2' : 'var(--accent-bg)', color: status.startsWith('❌') ? '#dc2626' : 'var(--accent)', fontSize: 12.5 * fontScale, fontFamily: 'var(--ff-mono)', whiteSpace: 'pre-line' }}>
+          {status}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// 업로드 양식 다운로드
 // ─────────────────────────────────────────────────────────────
 function ServerStorageTab({ data, setData, approvedIds, setApprovedIds, fontScale }) {
   const [config, setConfig] = React.useState(() => getStoredServerConfig() || { qaBinId: '', idsBinId: '' });
@@ -725,149 +952,55 @@ function ServerStorageTab({ data, setData, approvedIds, setApprovedIds, fontScal
 // ConvertPromptTab — Q&A JSON + ID JSON 변환 프롬프트
 // ─────────────────────────────────────────────────────────────
 function ConvertPromptTab({ fontScale }) {
-  const [copiedQA, setCopiedQA] = React.useState(false);
-  const [copiedId, setCopiedId] = React.useState(false);
-  const [activePrompt, setActivePrompt] = React.useState('qa'); // 'qa' | 'id'
-
-  const QA_PROMPT = `다음 첨부된 엑셀(.xlsx) 또는 PDF 파일을 아래 스키마의 JSON 배열로 변환해 주세요.
-
-[출력 스키마 — 객체 1개 = Q&A 1건]
-{
-  "id": 정수 (1부터 증가),
-  "qnum": "Q1-1" 또는 "1-1" 같은 질문번호 문자열,
-  "category": "화장품" | "건강기능식품" | "의약외품" | "의료기기" 중 해당하는 값,
-  "chapter": "제1장 총칙" 같은 장 이름 (없으면 ""),
-  "section": "제1절" 같은 절 이름 (없으면 ""),
-  "title": 질문 한 줄 요약 제목,
-  "question": 원문 질문 전체,
-  "answer": 원문 답변 전체 (줄바꿈은 \\n 으로 유지),
-  "source": "식품의약품안전처" 등 발행기관,
-  "sourceFile": 원본 파일명 (예: "화장품 자주하는 질문집 2024"),
-  "docNum": 문서번호 (없으면 ""),
-  "date": "YYYY.MM.DD" 형식 발행일,
-  "year": 정수 연도,
-  "functional": 기능성 화장품 관련이면 true, 아니면 false
-}
-
-[규칙]
-1. 출력은 유효한 JSON 배열 하나만. 앞뒤 설명·마크다운·코드펜스 금지.
-2. category는 파일 제목이나 내용으로 판단: 화장품 관련→"화장품", 건강기능식품/식품→"건강기능식품", 의약외품→"의약외품", 의료기기→"의료기기".
-3. 질문·답변에 있는 표는 텍스트로 풀어 쓰되 줄바꿈 유지.
-4. 장/절 제목이 별도 행으로 나오면 그 아래 모든 Q&A의 chapter/section에 동일 값 채움.
-5. title은 30자 이내로 질문을 압축. question이 이미 짧으면 그대로 사용.
-6. 빈 셀은 "" (빈 문자열), 숫자 필드가 비면 0 또는 해당 연도.
-7. id는 1부터 순번. qnum이 "Q1-1"이면 그대로 사용, 없으면 "A-1", "A-2" 식으로 생성.
-8. functional은 파일명/제목에 "기능성"이 포함되거나 자외선차단·미백·주름·염모 관련이면 true.
-9. 다 변환한 후 "JSON 가져오기/내보내기 → Q&A 데이터 → JSON 파일 선택…" 에서 "추가" 또는 "전체 교체" 모드로 업로드.
-
-파일을 첨부해 드립니다. 변환 시작해주세요.`;
-
-  const ID_PROMPT = `다음 첨부된 엑셀(.xlsx) 파일에 정리된 승인 ID 목록을 아래 스키마의 JSON 배열로 변환해 주세요.
-
-[출력 스키마 — 객체 1개 = 사용자 1명]
-{
-  "id": "사용자 ID 문자열 (예: user001)",
-  "name": "이름 또는 설명 (없으면 빈 문자열 \\"\\"),
-  "role": "user" 또는 "admin" (관리자 여부),
-  "active": true 또는 false (접속 허용 여부),
-  "addedAt": "YYYY-MM-DD 형식 등록일 (예: 2025-01-15)"
-}
-
-[규칙]
-1. 출력은 유효한 JSON 배열 하나만. 앞뒤 설명·마크다운·코드펜스 금지.
-2. role 컬럼이 없거나 비어 있으면 모두 "user"로 설정.
-3. active 컬럼이 없거나 비어 있으면 모두 true로 설정.
-4. addedAt이 없으면 오늘 날짜(YYYY-MM-DD) 사용.
-5. ID 컬럼이 비어있는 행은 건너뜀.
-6. ID에 공백이 있으면 제거하고 저장.
-7. 변환 완료 후 "JSON 가져오기/내보내기 → 승인 ID → JSON 파일 선택(전체 교체)" 에서 업로드.
-8. 또는 "서버 저장소" 탭에서 "서버에 업로드"로 전체 사용자에게 즉시 적용 가능.
-
-[엑셀 컬럼 예시]
-| ID (필수) | 이름 | 권한(user/admin) | 활성(true/false) | 등록일 |
-|-----------|------|-----------------|-----------------|--------|
-| user001   | 홍길동 | user           | true            | 2025-01-15 |
-
-엑셀 파일을 첨부해 드립니다. 변환 시작해주세요.`;
-
-  const copyQA = () => { navigator.clipboard.writeText(QA_PROMPT); setCopiedQA(true); setTimeout(() => setCopiedQA(false), 1800); };
-  const copyId = () => { navigator.clipboard.writeText(ID_PROMPT); setCopiedId(true); setTimeout(() => setCopiedId(false), 1800); };
+  const dl = (path) => {
+    const a = document.createElement('a');
+    a.href = path;
+    a.download = path.split('/').pop();
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
 
   return (
     <div>
-      <h2 style={{ fontSize: 20 * fontScale, margin: '0 0 6px', fontWeight: 600 }}>엑셀 / PDF → JSON 변환</h2>
-      <p style={{ fontSize: 13 * fontScale, color: 'var(--fg-sub)', margin: '0 0 24px', lineHeight: 1.7 }}>
-        ChatGPT, Claude 등 LLM에 원본 파일을 첨부하고 아래 프롬프트를 붙여넣으면 바로 사용 가능한 JSON을 받을 수 있습니다.
-        받은 JSON은 <strong>JSON 가져오기/내보내기</strong> 탭에서 업로드하세요.
+      <h2 style={{ fontSize: 20 * fontScale, margin: '0 0 6px', fontWeight: 600 }}>업로드 양식 다운로드</h2>
+      <p style={{ fontSize: 13 * fontScale, color: 'var(--fg-sub)', margin: '0 0 18px', lineHeight: 1.8 }}>
+        업로드할 엑셀 양식을 바로 내려받을 수 있습니다. 작성 후 <strong>가져오기 / 내보내기</strong> 탭에서 엑셀(.xlsx) 파일을 업로드하세요.
       </p>
 
-      {/* Prompt selector */}
-      <div style={{ display: 'flex', gap: 4, padding: 3, background: 'var(--bg-sub)', border: '1px solid var(--line-strong)', borderRadius: 9, marginBottom: 24, width: 'fit-content' }}>
-        <button onClick={() => setActivePrompt('qa')} style={segB(activePrompt === 'qa', fontScale, { padding: '8px 20px', fontSize: 13 * fontScale })}>📄 Q&A JSON 변환 프롬프트</button>
-        <button onClick={() => setActivePrompt('id')} style={segB(activePrompt === 'id', fontScale, { padding: '8px 20px', fontSize: 13 * fontScale })}>👥 승인 ID JSON 변환 프롬프트</button>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18 }}>
+        <div style={{ border: '1px solid var(--line)', borderRadius: 12, padding: 24, background: 'var(--bg)' }}>
+          <div style={{ fontSize: 18 * fontScale, fontWeight: 700, marginBottom: 10 }}>📄 Q&A 엑셀 공양식</div>
+          <div style={{ fontSize: 13 * fontScale, color: 'var(--fg-sub)', lineHeight: 1.7, marginBottom: 18 }}>
+            질문번호, 장, 절, 제목(키워드), 질문(원문), 답변(원문), 출처, 문서번호, 발행일 컬럼이 포함된 업로드 전용 양식입니다.
+          </div>
+          <button onClick={() => dl('/qna_template.xlsx')} style={{ ...pBtn(fontScale), width: '100%' }}>
+            Q&A 양식 다운로드
+          </button>
+        </div>
+
+        <div style={{ border: '1px solid var(--line)', borderRadius: 12, padding: 24, background: 'var(--bg)' }}>
+          <div style={{ fontSize: 18 * fontScale, fontWeight: 700, marginBottom: 10 }}>👥 승인 ID 엑셀 공양식</div>
+          <div style={{ fontSize: 13 * fontScale, color: 'var(--fg-sub)', lineHeight: 1.7, marginBottom: 18 }}>
+            승인ID, 이름, 역할, 활성여부, 등록일 컬럼이 포함된 업로드 전용 양식입니다.
+          </div>
+          <button onClick={() => dl('/id_template.xlsx')} style={{ ...pBtn(fontScale), width: '100%', background: '#059669' }}>
+            승인 ID 양식 다운로드
+          </button>
+        </div>
       </div>
 
-      {/* QA Prompt */}
-      {activePrompt === 'qa' && (
-        <div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, marginBottom: 28 }}>
-            {[{ n: 1, t: '프롬프트 복사', d: '아래 버튼 클릭' }, { n: 2, t: 'LLM에 붙여넣기', d: 'ChatGPT / Claude' }, { n: 3, t: '원본 파일 첨부', d: '.xlsx 또는 .pdf' }, { n: 4, t: 'JSON 업로드', d: '가져오기/내보내기 탭' }].map(s => (
-              <div key={s.n} style={{ padding: 14, background: 'var(--bg-sub)', border: '1px solid var(--line)', borderRadius: 10 }}>
-                <div style={{ width: 24, height: 24, borderRadius: '50%', background: 'var(--accent)', color: '#fff', fontSize: 11 * fontScale, fontFamily: 'var(--ff-mono)', fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 8 }}>{s.n}</div>
-                <div style={{ fontSize: 13 * fontScale, fontWeight: 600, marginBottom: 2 }}>{s.t}</div>
-                <div style={{ fontSize: 11 * fontScale, color: 'var(--muted)', fontFamily: 'var(--ff-mono)' }}>{s.d}</div>
-              </div>
-            ))}
-          </div>
-          <div style={{ border: '1px solid var(--line)', borderRadius: 10, padding: 20, background: 'var(--bg)' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-              <div style={{ fontSize: 11 * fontScale, fontFamily: 'var(--ff-mono)', color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: 0.6 }}>Q&A 변환 프롬프트</div>
-              <button onClick={copyQA} style={{ ...pBtn(fontScale) }}>{copiedQA ? '✓ 복사됨' : '프롬프트 복사'}</button>
-            </div>
-            <pre style={{ margin: 0, padding: 16, background: 'var(--bg-sub)', border: '1px solid var(--line)', borderRadius: 8, fontSize: 12 * fontScale, fontFamily: 'var(--ff-mono)', color: 'var(--fg-sub)', whiteSpace: 'pre-wrap', lineHeight: 1.7, maxHeight: 440, overflow: 'auto' }}>{QA_PROMPT}</pre>
-          </div>
-          <div style={{ marginTop: 16, padding: '14px 16px', background: 'var(--accent-bg)', borderRadius: 8, fontSize: 12.5 * fontScale, color: 'var(--accent)', lineHeight: 1.7 }}>
-            <strong style={{ fontWeight: 600 }}>💡 권장 LLM.</strong> 긴 문서 처리가 안정적인 <strong>Claude (Anthropic)</strong> 또는 <strong>ChatGPT (GPT-4o)</strong>. 대용량 PDF는 장별로 쪼개 여러 번 요청 후 JSON을 합쳐서 업로드하세요.
-          </div>
-        </div>
-      )}
-
-      {/* ID Prompt */}
-      {activePrompt === 'id' && (
-        <div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, marginBottom: 28 }}>
-            {[{ n: 1, t: '프롬프트 복사', d: '아래 버튼 클릭' }, { n: 2, t: 'LLM에 붙여넣기', d: 'ChatGPT / Claude' }, { n: 3, t: '엑셀 파일 첨부', d: 'ID 목록 .xlsx' }, { n: 4, t: 'ID JSON 업로드', d: '가져오기/내보내기 탭' }].map(s => (
-              <div key={s.n} style={{ padding: 14, background: 'var(--bg-sub)', border: '1px solid var(--line)', borderRadius: 10 }}>
-                <div style={{ width: 24, height: 24, borderRadius: '50%', background: '#059669', color: '#fff', fontSize: 11 * fontScale, fontFamily: 'var(--ff-mono)', fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 8 }}>{s.n}</div>
-                <div style={{ fontSize: 13 * fontScale, fontWeight: 600, marginBottom: 2 }}>{s.t}</div>
-                <div style={{ fontSize: 11 * fontScale, color: 'var(--muted)', fontFamily: 'var(--ff-mono)' }}>{s.d}</div>
-              </div>
-            ))}
-          </div>
-
-          <div style={{ padding: '12px 16px', background: '#ecfdf5', border: '1px solid #10b98133', borderRadius: 8, fontSize: 12.5 * fontScale, color: '#059669', lineHeight: 1.7, marginBottom: 20 }}>
-            <strong>💡 업로드 후 서버 동기화.</strong> JSON 업로드 후 <strong>서버 저장소 탭 → 서버에 업로드</strong>를 실행하면, 모든 승인된 사용자에게 즉시 새 ID 목록이 적용됩니다.
-          </div>
-
-          <div style={{ border: '1px solid var(--line)', borderRadius: 10, padding: 20, background: 'var(--bg)' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-              <div style={{ fontSize: 11 * fontScale, fontFamily: 'var(--ff-mono)', color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: 0.6 }}>승인 ID 변환 프롬프트</div>
-              <button onClick={copyId} style={{ ...pBtn(fontScale), background: '#059669' }}>{copiedId ? '✓ 복사됨' : '프롬프트 복사'}</button>
-            </div>
-            <pre style={{ margin: 0, padding: 16, background: 'var(--bg-sub)', border: '1px solid var(--line)', borderRadius: 8, fontSize: 12 * fontScale, fontFamily: 'var(--ff-mono)', color: 'var(--fg-sub)', whiteSpace: 'pre-wrap', lineHeight: 1.7, maxHeight: 440, overflow: 'auto' }}>{ID_PROMPT}</pre>
-          </div>
-
-          <div style={{ marginTop: 16, padding: '12px 16px', background: 'var(--bg-sub)', border: '1px solid var(--line)', borderRadius: 8, fontSize: 12 * fontScale, color: 'var(--fg-sub)', lineHeight: 1.65 }}>
-            <strong style={{ color: 'var(--fg)' }}>엑셀 컬럼 가이드.</strong> 필수 컬럼은 <strong>ID</strong>만입니다. 선택 컬럼으로 이름, 권한(user/admin), 활성여부(true/false), 등록일을 추가할 수 있습니다. LLM에 파일을 첨부할 때 열 이름을 알려주면 더 정확하게 변환됩니다.
-          </div>
-        </div>
-      )}
+      <div style={{ marginTop: 18, padding: '12px 14px', borderRadius: 8, background: 'var(--bg-sub)', border: '1px solid var(--line)', fontSize: 12.5 * fontScale, color: 'var(--fg-sub)', lineHeight: 1.8 }}>
+        💡 양식 파일도 GitHub/Netlify 배포 파일에 포함되어 있어야 다운로드가 동작합니다. 저장소 루트에 <code>qna_template.xlsx</code> 와 <code>id_template.xlsx</code> 파일을 함께 올려주세요.
+      </div>
     </div>
   );
 }
 
 // ─────────────────────────────────────────────────────────────
-// DeployGuide (unchanged)
+// DeployGuide
+// ─────────────────────────────────────────────────────────────
+ (unchanged)
 // ─────────────────────────────────────────────────────────────
 function DeployGuide({ fontScale }) {
   const cardStyle = { border: '1px solid var(--line)', borderRadius: 12, padding: 24, marginBottom: 20, background: 'var(--bg)' };
