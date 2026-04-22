@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="ko" data-theme="light">
+<head>
+<meta charset="utf-8">
+<title>화장품 Q&amp;A 검색</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+KR:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ff-sans: 'Inter', 'Noto Sans KR', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    --ff-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+    --bg: #ffffff; --bg-sub: #f7f7f6; --bg-input: #fafafa; --bg-active: #f0f4fb;
+    --fg: #1a1a1a; --fg-sub: #4a4a4a; --muted: #8a8a85;
+    --line: #ececea; --line-strong: #d9d9d5;
+    --accent: #1d4ed8; --accent-dim: #3b82f6; --accent-bg: #eff4ff;
+    --mark: #fef3c7; --mark-fg: #713f12;
+  }
+  [data-theme="dark"] {
+    --bg: #111111; --bg-sub: #181818; --bg-input: #1d1d1d; --bg-active: #17253e;
+    --fg: #f0f0ee; --fg-sub: #b5b5b0; --muted: #78786f;
+    --line: #252525; --line-strong: #353535;
+    --accent: #60a5fa; --accent-dim: #93c5fd; --accent-bg: rgba(96,165,250,0.12);
+    --mark: rgba(254,240,138,0.25); --mark-fg: #fde68a;
+  }
+  [data-theme="warm"] {
+    --bg: #fbfaf6; --bg-sub: #f4f1e8; --bg-input: #fdfcf8; --bg-active: #f0ebdb;
+    --fg: #1f1b15; --fg-sub: #5a4f3e; --muted: #8d8270;
+    --line: #e9e3d3; --line-strong: #d6ceba;
+    --accent: #a8500b; --accent-dim: #c96a1c; --accent-bg: #f7ece0;
+    --mark: #f7dfb7; --mark-fg: #6a3d06;
+  }
+  html, body { margin: 0; padding: 0; background: var(--bg); }
+  body { font-family: var(--ff-sans); color: var(--fg); }
+  * { box-sizing: border-box; }
+  mark { background: var(--mark); color: var(--mark-fg); }
+  button { font-family: inherit; }
+  ::selection { background: var(--accent-bg); color: var(--accent); }
+
+  .session-bar {
+    position: fixed; top: 14px; right: 20px; z-index: 100;
+    display: flex; gap: 6px; align-items: center; padding: 5px 6px 5px 12px;
+    background: var(--bg); border: 1px solid var(--line-strong);
+    border-radius: 999px; font-size: 12px; font-family: var(--ff-mono);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+  }
+  .session-bar .who { color: var(--fg-sub); display: flex; align-items: center; gap: 6px; }
+  .session-bar .badge {
+    padding: 2px 7px; background: var(--accent); color: #fff;
+    border-radius: 3px; font-weight: 600; font-size: 10px; letter-spacing: 0.4px;
+  }
+  .session-bar button {
+    padding: 5px 10px; border: none; background: var(--bg-sub);
+    color: var(--fg-sub); cursor: pointer; border-radius: 999px;
+    font-family: var(--ff-mono); font-size: 11px;
+  }
+  .session-bar button.admin-btn {
+    background: var(--accent); color: #fff; font-weight: 600;
+  }
+
+  .tweaks {
+    position: fixed; bottom: 20px; right: 20px; z-index: 100;
+    width: 280px; background: var(--bg); border: 1px solid var(--line-strong);
+    border-radius: 12px; padding: 16px 18px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.08);
+    font-family: var(--ff-sans); font-size: 13px;
+    display: none;
+  }
+  .tweaks.open { display: block; }
+  .tweaks h3 { font-size: 11px; font-family: var(--ff-mono); text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); margin: 0 0 14px; display: flex; justify-content: space-between; align-items: center; }
+  .tweaks .row { margin-bottom: 14px; }
+  .tweaks label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 6px; font-family: var(--ff-mono); text-transform: uppercase; letter-spacing: 0.5px; }
+  .tweaks .seg { display: flex; gap: 4px; border: 1px solid var(--line-strong); padding: 3px; border-radius: 7px; background: var(--bg-sub); }
+  .tweaks .seg button { flex: 1; padding: 5px; border: none; background: transparent; font-size: 11.5px; color: var(--fg-sub); cursor: pointer; border-radius: 4px; font-family: var(--ff-sans); }
+  .tweaks .seg button.on { background: var(--bg); color: var(--fg); box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+
+  /* ── 초기 로딩 스피너 (React 렌더링 전 표시) ── */
+  #loading-screen {
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--bg); z-index: 9999;
+    font-family: var(--ff-sans);
+  }
+  #loading-screen .spinner {
+    width: 36px; height: 36px;
+    border: 3px solid var(--line);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+  <!-- 로딩 스피너: React가 마운트되기 전 잠깐 표시, 이후 React가 root를 교체하면 자동으로 가려짐 -->
+  <div id="loading-screen">
+    <div class="spinner"></div>
+  </div>
+
+  <!-- React 마운트 지점 — 내용 비워둠 (이전 pre-rendered HTML 제거) -->
+  <div id="root"></div>
+
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+  <!-- SheetJS: 엑셀 파일 파싱 라이브러리 -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+  <script src="search-engine.js"></script>
+  <script type="text/babel" src="variation-b.jsx" data-filename="variation-b.jsx"></script>
+  <script type="text/babel" src="login-gate.jsx" data-filename="login-gate.jsx"></script>
+  <script type="text/babel" src="admin-panel.jsx" data-filename="admin-panel.jsx"></script>
+
+  <script type="text/babel" data-filename="app">
+    const TWEAKS = { theme: 'light', fontScale: 1.0, density: 'comfortable' };
+
+    const DEFAULT_IDS = [
+      { id: 'AP35000725', name: '시스템 관리자', addedAt: '2026-04-20', active: true, role: 'admin' },
+      { id: 'user001',    name: '샘플 사용자 1', addedAt: '2026-04-20', active: true, role: 'user'  },
+      { id: 'user002',    name: '샘플 사용자 2', addedAt: '2026-04-20', active: true, role: 'user'  },
+      { id: 'demo',       name: '데모 계정',     addedAt: '2026-04-20', active: true, role: 'user'  },
+    ];
+
+    // ─── Netlify Function 기반 서버 저장소 헬퍼 ─────────────────
+    const SERVER_CONFIG_KEY = 'qa-server-config';
+
+    function readStoredServerConfig() {
+      try { return JSON.parse(localStorage.getItem(SERVER_CONFIG_KEY) || 'null'); }
+      catch { return null; }
+    }
+
+    async function serverCall(payload) {
+      const r = await fetch('/.netlify/functions/jsonbin-proxy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload || {}),
+      });
+      let j = null;
+      try { j = await r.json(); } catch {}
+      if (!r.ok || !j?.ok) throw new Error(j?.error || `서버 오류 ${r.status}`);
+      return j;
+    }
+
+    async function loadServerConfig() {
+      try {
+        const j = await serverCall({ action: 'get-config' });
+        return j.config || null;
+      } catch {
+        return null;
+      }
+    }
+
+    function normalizeQaData(record) {
+      if (Array.isArray(record)) return record;
+      if (Array.isArray(record?.qa)) return record.qa;
+      if (Array.isArray(record?.data)) return record.data;
+      return null;
+    }
+
+    function normalizeIdsData(record) {
+      if (Array.isArray(record)) return record;
+      if (Array.isArray(record?.ids)) return record.ids;
+      if (Array.isArray(record?.data)) return record.data;
+      return null;
+    }
+
+    function App() {
+      const [baseData, setBaseData] = React.useState(null);
+      const [data, setData] = React.useState(null);
+
+      const [approvedIds, setApprovedIds] = React.useState(() => {
+        const s = localStorage.getItem('qa-approved-ids');
+        if (!s) return DEFAULT_IDS;
+        try {
+          let arr = JSON.parse(s);
+          arr = arr.map(a => ({ ...a, role: a.role || (a.id === 'AP35000725' ? 'admin' : 'user') }));
+          if (!arr.find(a => a.id === 'AP35000725')) {
+            arr = [{ id: 'AP35000725', name: '시스템 관리자', addedAt: '2026-04-20', active: true, role: 'admin' }, ...arr];
+          }
+          return arr;
+        } catch { return DEFAULT_IDS; }
+      });
+
+      const [session, setSession] = React.useState(() => {
+        const s = sessionStorage.getItem('qa-session');
+        return s ? JSON.parse(s) : null;
+      });
+      const [view, setView] = React.useState('search');
+
+      const [theme, setTheme] = React.useState(TWEAKS.theme);
+      const [fontScale, setFontScale] = React.useState(TWEAKS.fontScale);
+      const [density, setDensity] = React.useState(TWEAKS.density);
+      const [query, setQuery] = React.useState(localStorage.getItem('qa-query') || '');
+      const [filters, setFilters] = React.useState({});
+      const [expandedId, setExpandedId] = React.useState(null);
+      const [tweaksOpen, setTweaksOpen] = React.useState(false);
+      const [selectedCategory, setSelectedCategory] = React.useState(null);
+
+      // ── 마운트 시: Netlify Function → 서버 설정 조회 → 자동 로드 ──
+      React.useEffect(() => {
+        const loadLocal = () => {
+          fetch('data/qa.json').then(r => r.json()).then(d => {
+            setBaseData(d);
+            const o = localStorage.getItem('qa-data-overlay');
+            if (o) { try { setData(JSON.parse(o)); } catch { setData(d); } }
+            else setData(d);
+          }).catch(() => { setBaseData([]); setData([]); });
+        };
+
+        (async () => {
+          const publicCfg = await loadServerConfig();
+          const localCfg = readStoredServerConfig();
+          const serverCfg = (publicCfg && publicCfg.qaBinId) ? publicCfg : localCfg;
+
+          if (serverCfg && serverCfg.qaBinId) {
+            try {
+              const [qaRes, idsRes] = await Promise.all([
+                serverCall({ action: 'read', type: 'qa', binId: serverCfg.qaBinId }),
+                serverCfg.idsBinId ? serverCall({ action: 'read', type: 'ids', binId: serverCfg.idsBinId }) : Promise.resolve({ record: null }),
+              ]);
+
+              const qaData = normalizeQaData(qaRes.record);
+              const idsData = normalizeIdsData(idsRes.record);
+
+              if (Array.isArray(qaData)) {
+                setBaseData(qaData);
+                setData(qaData);
+              } else {
+                loadLocal();
+              }
+
+              if (Array.isArray(idsData) && idsData.length) setApprovedIds(idsData);
+            } catch (e) {
+              console.warn('서버 자동 로드 실패:', e);
+              loadLocal();
+            }
+          } else {
+            loadLocal();
+          }
+        })();
+      }, []);
+
+      React.useEffect(() => { document.documentElement.setAttribute('data-theme', theme); }, [theme]);
+      React.useEffect(() => { localStorage.setItem('qa-query', query); }, [query]);
+      React.useEffect(() => { localStorage.setItem('qa-approved-ids', JSON.stringify(approvedIds)); }, [approvedIds]);
+      React.useEffect(() => {
+        if (data && baseData && data !== baseData) localStorage.setItem('qa-data-overlay', JSON.stringify(data));
+      }, [data]);
+      React.useEffect(() => {
+        if (session) sessionStorage.setItem('qa-session', JSON.stringify(session));
+        else sessionStorage.removeItem('qa-session');
+      }, [session]);
+
+      // ── React 마운트 완료 → 로딩 스피너 숨김 ──
+      React.useEffect(() => {
+        const el = document.getElementById('loading-screen');
+        if (el) el.style.display = 'none';
+      }, []);
+
+      // 데이터 로딩 중
+      if (!data) return (
+        <div style={{ padding: 80, textAlign: 'center', color: 'var(--muted)', fontFamily: 'var(--ff-sans)' }}>
+          데이터 불러오는 중…
+        </div>
+      );
+
+      // 미로그인 → 로그인 화면
+      if (!session) {
+        return <LoginGate approvedIds={approvedIds} onAuthed={(s) => { setSession(s); setView('search'); }} fontScale={fontScale} />;
+      }
+
+      const isAdmin = session.role === 'admin';
+
+      // 관리자 콘솔
+      if (isAdmin && view === 'admin') {
+        return (
+          <AdminPanel
+            approvedIds={approvedIds} setApprovedIds={setApprovedIds}
+            data={data} setData={setData}
+            onExit={() => setView('search')}
+            onLogout={() => { setSession(null); setView('search'); }}
+            fontScale={fontScale}
+          />
+        );
+      }
+
+      // 검색 화면
+      return (
+        <>
+          <div className="session-bar">
+            <span className="who">
+              {isAdmin && <span className="badge">ADMIN</span>}
+              {session.name ? session.name + ' · ' : ''}{session.id}
+            </span>
+            {isAdmin && (
+              <button className="admin-btn" onClick={() => setView('admin')}>관리자 메뉴</button>
+            )}
+            <button onClick={() => { setSession(null); setView('search'); }}>로그아웃</button>
+          </div>
+
+          <VariationB
+            data={data} query={query} setQuery={setQuery}
+            filters={filters} setFilters={setFilters}
+            expandedId={expandedId} setExpandedId={setExpandedId}
+            density={density} fontScale={fontScale}
+            selectedCategory={selectedCategory}
+            setSelectedCategory={setSelectedCategory}
+          />
+
+          <div className={'tweaks ' + (tweaksOpen ? 'open' : '')}>
+            <h3>Tweaks <button onClick={() => setTweaksOpen(false)} style={{ background: 'none', border: 'none', color: 'var(--muted)', cursor: 'pointer', fontSize: 14 }}>×</button></h3>
+            <div className="row"><label>테마</label>
+              <div className="seg">{['light','dark','warm'].map(t => (<button key={t} className={theme === t ? 'on' : ''} onClick={() => setTheme(t)}>{t === 'light' ? '라이트' : t === 'dark' ? '다크' : '웜'}</button>))}</div>
+            </div>
+            <div className="row"><label>폰트 크기</label>
+              <div className="seg">{[{l:'S',v:0.9},{l:'M',v:1.0},{l:'L',v:1.1},{l:'XL',v:1.25}].map(o => (<button key={o.l} className={fontScale === o.v ? 'on' : ''} onClick={() => setFontScale(o.v)}>{o.l}</button>))}</div>
+            </div>
+            <div className="row"><label>결과 밀도</label>
+              <div className="seg">
+                <button className={density === 'compact' ? 'on' : ''} onClick={() => setDensity('compact')}>컴팩트</button>
+                <button className={density === 'comfortable' ? 'on' : ''} onClick={() => setDensity('comfortable')}>편안</button>
+              </div>
+            </div>
+          </div>
+        </>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+
+</body>
+</html>
