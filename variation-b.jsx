@@ -82,7 +82,7 @@ function CategorySelect({ data, onSelect, fontScale }) {
         </div>
 
         <div style={{ marginTop: 32, padding: '14px 18px', background: 'var(--bg-sub)', border: '1px solid var(--line)', borderRadius: 10, fontSize: 12 * fontScale, color: 'var(--fg-sub)', lineHeight: 1.65 }}>
-          💡 <strong style={{ color: 'var(--fg)' }}>데이터 없음</strong>으로 표시된 유형은 관리자 콘솔 → <strong>JSON 가져오기/내보내기</strong> 탭에서 해당 카테고리 Q&A JSON을 업로드하면 활성화됩니다.
+          💡 <strong style={{ color: 'var(--fg)' }}>데이터 없음</strong>으로 표시된 유형은 관리자 콘솔 → <strong>가져오기 / 내보내기</strong> 탭에서 해당 카테고리의 Q&A 엑셀 파일을 업로드하면 활성화됩니다.
         </div>
       </div>
     </div>
