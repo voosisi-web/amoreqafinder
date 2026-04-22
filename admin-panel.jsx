@@ -46,7 +46,7 @@ function AdminPanel({ approvedIds, setApprovedIds, data, setData, onExit, onLogo
     { k: 'qa',      label: 'Q&A 관리', count: data.length },
     { k: 'import',  label: '가져오기 / 내보내기' },
     { k: 'server',  label: '서버 저장소' },
-    { k: 'convert', label: '엑셀/PDF → JSON 변환' },
+    { k: 'convert', label: '업로드 양식 다운로드' },
     { k: 'deploy',  label: '배포 / 공유' },
   ];
 
@@ -295,7 +295,7 @@ const QA_COL_MAP = {
 
 // ID 엑셀 컬럼명 → JSON 필드명 매핑
 const ID_COL_MAP = {
-  'id': 'id', 'ID': 'id', '아이디': 'id', '사용자id': 'id', '사용자 id': 'id',
+  'id': 'id', 'ID': 'id', '승인id': 'id', '승인 ID': 'id', '승인아이디': 'id', '아이디': 'id', '사용자id': 'id', '사용자 id': 'id',
   'name': 'name', '이름': 'name', '성명': 'name', '담당자': 'name', '사용자명': 'name',
   'role': 'role', '역할': 'role', '권한': 'role', '권한명': 'role',
   'active': 'active', '활성': 'active', '사용': 'active', '활성여부': 'active', '사용여부': 'active',
